@@ -14,6 +14,7 @@ import { DriversService } from '../drivers/drivers.service';
 import { DriverStatus } from '../drivers/entities/driver-status.enum';
 import { CreateRideDto } from './dto/create-ride.dto';
 import { CHECK_OFFER_TIMEOUT_JOB, OFFER_TIMEOUT_QUEUE, OfferTimeoutJobData } from './offer-timeout.queue';
+import { RideOffersGateway } from './ride-offers.gateway';
 
 const OFFER_BATCH_SIZE = 5;
 const SEARCH_RADIUS_KM = 5;
@@ -34,12 +35,13 @@ export class RidesService {
     private readonly offerTimeoutQueue: Queue<OfferTimeoutJobData>,
     @Inject(REDIS_CLIENT)
     private readonly redis: Redis,
+    private readonly rideOffersGateway: RideOffersGateway,
     configService: ConfigService,
   ) {
     // ConfigService.get<number>() does not actually cast env strings to
     // numbers — the generic is compile-time only — so cast explicitly.
-    this.offerTimeoutMs = Number(configService.get('OFFER_TIMEOUT_MS', 10_000));
-    this.maxSearchDurationMs = Number(configService.get('MAX_SEARCH_DURATION_MS', 60_000));
+    this.offerTimeoutMs = Number(configService.get('OFFER_TIMEOUT_MS', 30_000));
+    this.maxSearchDurationMs = Number(configService.get('MAX_SEARCH_DURATION_MS', 5 * 60_000));
   }
 
   private async getRideOrThrow(id: string): Promise<Ride> {
@@ -96,6 +98,18 @@ export class RidesService {
       );
       await this.assignmentsRepository.save(assignments);
       ride.lastOfferedAt = new Date();
+
+      for (const driver of nearbyDrivers) {
+        this.rideOffersGateway.notifyOffer(driver.id, {
+          rideId: ride.id,
+          pickupLat: ride.pickupLat,
+          pickupLng: ride.pickupLng,
+          dropoffLat: ride.dropoffLat,
+          dropoffLng: ride.dropoffLng,
+          distanceKm: driver.distanceKm,
+          offerExpiresInMs: this.offerTimeoutMs,
+        });
+      }
     }
     // If zero drivers were found, lastOfferedAt is intentionally left
     // unchanged — no real batch was offered, so nothing should reset the
@@ -125,6 +139,14 @@ export class RidesService {
       return; // stale/redelivered job from a batch that's since been superseded
     }
 
+    // Capture who's still outstanding before expiring, purely so we know who
+    // to push a "your offer closed" notification to below — this list has no
+    // bearing on the expiry itself, which is the atomic update right after.
+    const outstanding = await this.assignmentsRepository.find({
+      where: { rideId, status: AssignmentStatus.OFFERED },
+      select: ['driverId'],
+    });
+
     // Expire whatever offers from this batch are still outstanding. Uses the
     // same conditional-on-current-status pattern as accept() — whichever
     // operation actually commits first for a given assignment row wins, so a
@@ -135,6 +157,10 @@ export class RidesService {
       .set({ status: AssignmentStatus.EXPIRED, respondedAt: new Date() })
       .where('rideId = :rideId AND status = :offered', { rideId, offered: AssignmentStatus.OFFERED })
       .execute();
+
+    for (const { driverId } of outstanding) {
+      this.rideOffersGateway.notifyOfferClosed(driverId, { rideId, reason: 'expired' });
+    }
 
     const elapsedMs = Date.now() - ride.createdAt.getTime();
     if (elapsedMs >= this.maxSearchDurationMs) {
@@ -193,12 +219,21 @@ export class RidesService {
     ride.assignedDriverId = driverId;
     await this.ridesRepository.save(ride);
 
+    const otherOffers = await this.assignmentsRepository.find({
+      where: { rideId, status: AssignmentStatus.OFFERED },
+      select: ['driverId'],
+    });
+
     await this.assignmentsRepository
       .createQueryBuilder()
       .update(RideAssignment)
       .set({ status: AssignmentStatus.EXPIRED, respondedAt: new Date() })
       .where('rideId = :rideId AND status = :offered', { rideId, offered: AssignmentStatus.OFFERED })
       .execute();
+
+    for (const { driverId: otherDriverId } of otherOffers) {
+      this.rideOffersGateway.notifyOfferClosed(otherDriverId, { rideId, reason: 'assigned_to_other' });
+    }
 
     await this.driversService.updateStatus(driverId, DriverStatus.BUSY);
 

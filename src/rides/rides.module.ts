@@ -7,6 +7,7 @@ import { RidesController } from './rides.controller';
 import { RidesService } from './rides.service';
 import { OfferTimeoutProcessor } from './offer-timeout.processor';
 import { OFFER_TIMEOUT_QUEUE } from './offer-timeout.queue';
+import { RideOffersGateway } from './ride-offers.gateway';
 import { DriversModule } from '../drivers/drivers.module';
 
 @Module({
@@ -16,7 +17,7 @@ import { DriversModule } from '../drivers/drivers.module';
     DriversModule,
   ],
   controllers: [RidesController],
-  providers: [RidesService, OfferTimeoutProcessor],
+  providers: [RidesService, OfferTimeoutProcessor, RideOffersGateway],
   exports: [RidesService],
 })
 export class RidesModule {}

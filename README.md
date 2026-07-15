@@ -3,14 +3,21 @@
 > **Reviewing this for the concurrency requirement?** Skip straight to
 > [Concurrency verification](#concurrency-verification) — two ways to prove exactly one
 > driver wins when several accept the same ride at once, both runnable in one command
-> with no manual setup. Full setup and design details start below.
+> with no manual setup.
+>
+> **Timing:** by default an offer batch expires after 30s and a ride gives up after 5
+> minutes (`OFFER_TIMEOUT_MS`, `MAX_SEARCH_DURATION_MS` in `.env`). To watch a retry or
+> a `TIMEOUT` happen without waiting that long, lower them before starting the app, e.g.
+> `OFFER_TIMEOUT_MS=5000 MAX_SEARCH_DURATION_MS=15000 npm run start:dev`.
+>
+> Full setup and design details start below.
 
 Real-Time Driver Allocation System for vybe cabs. When a rider requests a ride, the
 system identifies the nearest available drivers, notifies multiple drivers
 simultaneously, and ensures that only one driver is successfully assigned, based on
 the first acceptance.
 
-Stack: NestJS (TypeScript), PostgreSQL, Redis, BullMQ.
+Stack: NestJS (TypeScript), PostgreSQL, Redis, BullMQ, WebSockets (Socket.IO).
 
 ## Architecture overview
 
@@ -21,7 +28,7 @@ flowchart TD
     C --> D{"Drivers found?"}
     D -- "No" --> E["Ride stays SEARCHING\n(lastOfferedAt unchanged)"]
     D -- "Yes" --> F["Create RideAssignment rows\nstatus: OFFERED\nRide status: SEARCHING"]
-    F --> G["Response: offeredDrivers\n(= driver notification)"]
+    F --> G["Push ride:offer over WebSocket\nto each offered driver"]
     F --> H["Schedule BullMQ delayed job\nfires after OFFER_TIMEOUT_MS"]
     E --> H
 
@@ -34,12 +41,14 @@ flowchart TD
     L -- "won the lock" --> M["Postgres: UPDATE ride_assignment\nSET ACCEPTED WHERE status = OFFERED"]
 
     M -- "1 row updated" --> O["Ride: ASSIGNED\nOther OFFERED rows -> EXPIRED\nWinning driver -> BUSY"]
+    O --> O2["Push ride:offer:closed\n(assigned_to_other) to losers"]
     M -- "0 rows updated\n(offer already expired)" --> P["Roll back Redis lock\n409 Conflict"]
 
     H --> Q{"Job fires:\nride still SEARCHING?"}
     Q -- "No (already ASSIGNED)" --> R["No-op"]
     Q -- "Yes" --> S["Expire current batch\nOFFERED -> EXPIRED"]
-    S --> T{"Total elapsed >\nMAX_SEARCH_DURATION_MS?"}
+    S --> S2["Push ride:offer:closed\n(expired) to that batch"]
+    S2 --> T{"Total elapsed >\nMAX_SEARCH_DURATION_MS?"}
     T -- "Yes" --> U["Ride: TIMEOUT"]
     T -- "No" --> C
 ```
@@ -123,6 +132,8 @@ docker compose down -v
     concurrency guard), and the timeout/retry handler.
   - `offer-timeout.queue.ts` / `offer-timeout.processor.ts` — BullMQ delayed job that
     fires when an offer batch's window elapses.
+  - `ride-offers.gateway.ts` — WebSocket push (`ride:offer`, `ride:offer:closed`); see
+    [Driver notification](#driver-notification-websocket) below.
 - `test/ride-concurrency.e2e-spec.ts` / `scripts/verify-concurrency.sh` — the concurrency
   verification test and script (see [Concurrency verification](#concurrency-verification)
   below).
@@ -138,11 +149,55 @@ or the batch's offer window elapsed).
 
 Two timers govern retries (both configurable via `.env`, defaults below):
 
-- `OFFER_TIMEOUT_MS` (default `10000`) — how long one batch of offered drivers has to
-  respond before it's retried with the next-nearest drivers, excluding everyone already
-  tried for that ride.
-- `MAX_SEARCH_DURATION_MS` (default `60000`) — total time budget across all retries
-  before the ride gives up and moves to `TIMEOUT`.
+- `OFFER_TIMEOUT_MS` (default `30000`, 30s) — how long one batch of offered drivers has
+  to respond before it's retried with the next-nearest drivers, excluding everyone
+  already tried for that ride.
+- `MAX_SEARCH_DURATION_MS` (default `300000`, 5 minutes) — total time budget across all
+  retries before the ride gives up and moves to `TIMEOUT`.
+
+Both are read from `.env` — see the note at the top of this README if you want to speed
+them up while testing.
+
+## Driver notification (WebSocket)
+
+The brief allows WebSockets, SSE, polling, or a simulated notification log for
+"notify multiple drivers simultaneously" — this project uses **WebSockets** (via
+`@nestjs/websockets` + Socket.IO, `src/rides/ride-offers.gateway.ts`).
+
+**Why, specifically for this system:** offer windows are short by design
+(`OFFER_TIMEOUT_MS` defaults to 30s, and can reasonably be tuned much lower — we ran it
+at 3-10s while testing). A polling driver app would need to poll faster than that
+interval to reliably see an offer before it expires, which is either wasteful (polling
+constantly "just in case") or lossy (polling too slowly and missing the window
+entirely). A WebSocket push has neither problem — the server notifies the instant an
+offer is created, with no interval to tune and no missed windows. Given how central the
+offer-timeout mechanic is to this system, that tradeoff mattered enough to justify the
+extra moving part over the simpler polling/log alternatives.
+
+Importantly, **this gateway is notification-only and has no bearing on correctness** —
+drivers still call the ordinary REST `PATCH /rides/:id/accept` to actually accept, so
+the entire concurrency guarantee above is unaffected by this section; it would hold
+identically if this gateway didn't exist.
+
+**Connecting** (driver identifies itself via a `driverId` query param on the socket
+handshake — no auth token, kept simple for this scope):
+
+```js
+const socket = io("http://localhost:3001", { query: { driverId: "<driver-uuid>" } });
+
+socket.on("ride:offer", (payload) => {
+  // { rideId, pickupLat, pickupLng, dropoffLat, dropoffLng, distanceKm, offerExpiresInMs }
+});
+
+socket.on("ride:offer:closed", (payload) => {
+  // { rideId, reason: "assigned_to_other" | "expired" }
+});
+```
+
+- `ride:offer` — pushed to every driver in a batch the instant it's created.
+- `ride:offer:closed` — pushed to a driver when their specific offer stops being live:
+  `assigned_to_other` if someone else won the ride, `expired` if the batch's offer
+  window elapsed with nobody accepting.
 
 ## Concurrency guarantee
 
