@@ -16,7 +16,7 @@ export class RideAssignment {
   @Column({ type: 'enum', enum: AssignmentStatus, default: AssignmentStatus.OFFERED })
   status: AssignmentStatus;
 
-  @CreateDateColumn()
+  @CreateDateColumn({ type: 'timestamptz' })
   offeredAt: Date;
 
   @Column({ type: 'timestamptz', nullable: true })
