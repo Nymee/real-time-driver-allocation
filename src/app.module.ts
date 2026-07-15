@@ -4,6 +4,8 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { RedisModule } from './redis/redis.module';
+import { DriversModule } from './drivers/drivers.module';
+import { RidesModule } from './rides/rides.module';
 
 @Module({
   imports: [
@@ -22,6 +24,8 @@ import { RedisModule } from './redis/redis.module';
       }),
     }),
     RedisModule,
+    DriversModule,
+    RidesModule,
   ],
   controllers: [AppController],
   providers: [AppService],
