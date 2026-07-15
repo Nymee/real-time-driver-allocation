@@ -1,5 +1,10 @@
 # real-time-driver-allocation
 
+> **Reviewing this for the concurrency requirement?** Skip straight to
+> [Concurrency verification](#concurrency-verification) — two ways to prove exactly one
+> driver wins when several accept the same ride at once, both runnable in one command
+> with no manual setup. Full setup and design details start below.
+
 Real-Time Driver Allocation System for vybe cabs. When a rider requests a ride, the
 system identifies the nearest available drivers, notifies multiple drivers
 simultaneously, and ensures that only one driver is successfully assigned, based on
@@ -118,7 +123,9 @@ docker compose down -v
     concurrency guard), and the timeout/retry handler.
   - `offer-timeout.queue.ts` / `offer-timeout.processor.ts` — BullMQ delayed job that
     fires when an offer batch's window elapses.
-- `test/ride-concurrency.e2e-spec.ts` — the concurrency verification test (see below).
+- `test/ride-concurrency.e2e-spec.ts` / `scripts/verify-concurrency.sh` — the concurrency
+  verification test and script (see [Concurrency verification](#concurrency-verification)
+  below).
 
 ## Ride lifecycle
 
@@ -151,11 +158,37 @@ in-process locks (so it holds correctly even across multiple app instances):
    `WHERE status = 'OFFERED'` guard, so whichever operation's `UPDATE` commits first for
    a given row wins — deterministically, not by timing heuristics.
 
-Run the automated proof yourself (item 6 — spins up 8 drivers, fires all their `accept`
-calls at the same instant, asserts exactly one succeeds):
+## Concurrency verification
+
+Two ways to prove exactly one driver wins when many accept the same ride at once —
+both create their own test drivers, so there's no manual setup needed:
+
+**Automated test** — creates 8 drivers, fires all their `accept` calls simultaneously,
+asserts exactly one `200`/`ACCEPTED` and checks the database directly:
 
 ```bash
 npm run test:e2e
+```
+
+**Standalone script** — same idea, but prints every driver's response live so you can
+watch the race resolve in real time:
+
+```bash
+./scripts/verify-concurrency.sh
+# or, with more drivers:
+DRIVER_COUNT=20 ./scripts/verify-concurrency.sh
+```
+
+```
+== Firing all 5 accept calls at the exact same instant ==
+
+== Results ==
+  d8c39058-... -> HTTP 409 -> {"message":"Ride ... was already accepted by another driver", ...}
+  4afcac3c-... -> HTTP 409 -> {"message":"Ride ... was already accepted by another driver", ...}
+  5f3c6af1-... -> HTTP 200 -> {"ride":{...,"status":"ASSIGNED","assignedDriverId":"5f3c6af1-..."},"outcome":"ACCEPTED"}
+  d9c6ca69-... -> HTTP 409 -> {"message":"Ride ... was already accepted by another driver", ...}
+
+PASS: exactly 1 of 5 simultaneous accept calls succeeded.
 ```
 
 ## API usage
