@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { BullModule } from '@nestjs/bullmq';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { RedisModule } from './redis/redis.module';
@@ -21,6 +22,15 @@ import { RidesModule } from './rides/rides.module';
         database: configService.get<string>('POSTGRES_DB', 'driver_allocation'),
         autoLoadEntities: true,
         synchronize: configService.get<string>('NODE_ENV', 'development') !== 'production',
+      }),
+    }),
+    BullModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: (configService: ConfigService) => ({
+        connection: {
+          host: configService.get<string>('REDIS_HOST', 'localhost'),
+          port: configService.get<number>('REDIS_PORT', 6379),
+        },
       }),
     }),
     RedisModule,

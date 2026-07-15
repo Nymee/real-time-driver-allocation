@@ -57,8 +57,8 @@ export class DriversService {
     return driver;
   }
 
-  async findNearby(lat: number, lng: number, radiusKm: number, limit: number) {
-    const nearby = await this.geoService.findNearby(lat, lng, radiusKm, limit);
+  async findNearby(lat: number, lng: number, radiusKm: number, limit: number, excludeDriverIds: string[] = []) {
+    const nearby = await this.geoService.findNearby(lat, lng, radiusKm, limit, excludeDriverIds);
     if (nearby.length === 0) {
       return [];
     }
