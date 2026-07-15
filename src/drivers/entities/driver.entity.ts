@@ -24,9 +24,9 @@ export class Driver {
   @Column({ type: 'enum', enum: DriverStatus, default: DriverStatus.OFFLINE })
   status: DriverStatus;
 
-  @CreateDateColumn()
+  @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;
 
-  @UpdateDateColumn()
+  @UpdateDateColumn({ type: 'timestamptz' })
   updatedAt: Date;
 }

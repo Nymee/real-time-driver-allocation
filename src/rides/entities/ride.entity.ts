@@ -33,9 +33,12 @@ export class Ride {
   @Column({ type: 'uuid', nullable: true })
   assignedDriverId: string | null;
 
-  @CreateDateColumn()
+  @Column({ type: 'timestamptz', nullable: true })
+  lastOfferedAt: Date | null;
+
+  @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;
 
-  @UpdateDateColumn()
+  @UpdateDateColumn({ type: 'timestamptz' })
   updatedAt: Date;
 }

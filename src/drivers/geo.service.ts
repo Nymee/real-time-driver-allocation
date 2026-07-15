@@ -39,7 +39,18 @@ export class GeoService {
     return { lat: parseFloat(result.lat), lng: parseFloat(result.lng) };
   }
 
-  async findNearby(lat: number, lng: number, radiusKm: number, limit: number): Promise<NearbyDriver[]> {
+  async findNearby(
+    lat: number,
+    lng: number,
+    radiusKm: number,
+    limit: number,
+    excludeDriverIds: string[] = [],
+  ): Promise<NearbyDriver[]> {
+    // GEOSEARCH has no "exclude member" option, so overfetch by exactly the
+    // number of exclusions — at most that many candidates can be filtered
+    // out, guaranteeing `limit` results remain if that many exist at all.
+    const overfetchLimit = limit + excludeDriverIds.length;
+
     const results = (await this.redis.geosearch(
       AVAILABLE_DRIVERS_KEY,
       'FROMLONLAT',
@@ -50,13 +61,14 @@ export class GeoService {
       'km',
       'ASC',
       'COUNT',
-      limit,
+      overfetchLimit,
       'WITHDIST',
     )) as [string, string][];
 
-    return results.map(([driverId, distance]) => ({
-      driverId,
-      distanceKm: parseFloat(distance),
-    }));
+    const excludeSet = new Set(excludeDriverIds);
+    return results
+      .map(([driverId, distance]) => ({ driverId, distanceKm: parseFloat(distance) }))
+      .filter((driver) => !excludeSet.has(driver.driverId))
+      .slice(0, limit);
   }
 }
